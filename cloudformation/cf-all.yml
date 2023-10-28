@@ -1,0 +1,320 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Spark Covid
+
+Parameters:
+  EC2NameTag:
+    Type: String
+    Default: covid-19-aws-spark-reports
+  EC2Key:
+    Type: String
+    Default: shaylin-aws
+
+Resources:
+  ##################################################
+  ## CodeBuild
+  CodeBuildRole:  
+    Type: AWS::IAM::Role
+    Properties:      
+      RoleName: covid-19-aws-spark-reports-code-build-role
+      Path: /service-role/
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+              - codebuild.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      ## TODO: replace admin policy with more fine grained policies
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AdministratorAccess
+        # - arn:aws:iam::aws:policy/AmazonS3FullAccess
+        # - arn:aws:iam::aws:policy/CloudWatchLogsFullAccess
+        # - arn:aws:iam::aws:policy/AWSCodeBuildAdminAccess
+  
+  CodeBuildBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: covid-19-aws-spark-reports-code-build-artifact-bucket
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  SparkCovidCodeBuild:
+    Type: AWS::CodeBuild::Project    
+    DependsOn: CodeBuildRole
+    Properties:
+        Name: covid-19-aws-spark-reports-code-builder
+        Description: Covid Spark Artifactory Builder
+        Artifacts: 
+          EncryptionDisabled: true
+          Location: !Ref CodeBuildBucket
+          Name: covid-19-aws-spark-reports.zip
+          NamespaceType: NONE
+          OverrideArtifactName: false
+          Packaging: ZIP
+          Path: ''
+          Type: S3
+        BadgeEnabled: false
+        Cache: 
+          Type: NO_CACHE    
+        ## TODO: enable encryption for S3 buckets too    
+        # EncryptionKey: arn:aws:kms:*****/aws/s3  
+        Environment: 
+          Type: LINUX_CONTAINER
+          ComputeType: BUILD_GENERAL1_SMALL
+          EnvironmentVariables: []
+          Image: aws/codebuild/standard:4.0
+          ImagePullCredentialsType: CODEBUILD
+          PrivilegedMode: false        
+        LogsConfig: 
+          CloudWatchLogs:
+            GroupName: covid-19-aws-spark-reports-code-build
+            Status: ENABLED
+          S3Logs:
+            EncryptionDisabled: true
+            Status: DISABLED                
+        QueuedTimeoutInMinutes: 480                
+        ServiceRole: !GetAtt CodeBuildRole.Arn        
+        Source: 
+          GitCloneDepth: 1
+          GitSubmodulesConfig:
+            FetchSubmodules: false
+          InsecureSsl: false
+          Location: https://github.com/ShaylinThadani/covid-19-aws-spark-reports.git
+          ReportBuildStatus: false
+          Type: GITHUB
+        SourceVersion: master
+        TimeoutInMinutes: 60
+        Triggers: 
+          Webhook: true
+          FilterGroups:            
+            - - Type: EVENT
+                Pattern: PUSH
+                ExcludeMatchedPattern: false
+
+  ##################################################
+  ## CodeDeploy
+  CodeDeployRole:  
+    Type: AWS::IAM::Role
+    Properties:      
+      RoleName: covid-19-aws-spark-reports-code-deploy-role
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+              - codedeploy.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      ## TODO: replace admin policy with more fine grained policies
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AdministratorAccess
+
+  CodeDeployApplication:
+    Type: AWS::CodeDeploy::Application
+    Properties: 
+      ApplicationName: covid-19-aws-spark-reports-code-deploy
+      ComputePlatform: Server
+  
+  CodeDeployApplicationGroup:
+    Type: AWS::CodeDeploy::DeploymentGroup
+    Properties:
+      ApplicationName: !Ref CodeDeployApplication
+      DeploymentGroupName: covid-19-aws-spark-reports-code-deploy-group
+      DeploymentConfigName: CodeDeployDefault.AllAtOnce
+      ServiceRoleArn: !GetAtt CodeDeployRole.Arn
+      DeploymentStyle:
+        DeploymentOption: WITHOUT_TRAFFIC_CONTROL
+        DeploymentType: IN_PLACE
+      Ec2TagSet:
+        Ec2TagSetList:
+        - Ec2TagGroup:
+          - Key: Name            
+            Value: !Ref EC2NameTag
+            Type: KEY_AND_VALUE
+
+  CodeBuildBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: shaylin-covid-19-aws-spark-reports  ## SEE: run_job.sh
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  SSHSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:     
+      GroupName: ssh
+      GroupDescription: shh access for ec2      
+      SecurityGroupIngress:         
+        - FromPort: 22
+          IpProtocol: tcp          
+          CidrIp: 0.0.0.0/0
+          ToPort: 22
+  
+  EC2DeployRole:  
+    Type: AWS::IAM::Role
+    Properties:      
+      RoleName: covid-19-aws-spark-reports-ec2-deploy-role
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+              - ec2.amazonaws.com
+              - s3.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      ## TODO: replace admin policy with more fine grained policies
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AdministratorAccess
+
+  EC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties: 
+      InstanceProfileName: covid-19-aws-spark-reports-ec2-instance-profile
+      Path: /
+      Roles: 
+        - !Ref EC2DeployRole
+
+  EC2Worker:
+    Type: AWS::EC2::Instance
+    DependsOn: EC2DeployRole
+    Properties: 
+      ImageId: ami-0f7919c33c90f5b58
+      InstanceType: t2.micro
+      KeyName: !Ref EC2Key
+      IamInstanceProfile: !Ref EC2InstanceProfile
+      SecurityGroupIds:
+        - !Ref SSHSecurityGroup 
+      Tags:
+      - Key: Name
+        Value: !Ref EC2NameTag
+      UserData: 
+        Fn::Base64:
+          !Sub |
+          #!/bin/bash
+          sudo yum -y update
+          sudo yum install -y ruby
+          sudo yum install -y git
+          sudo yum install -y java-1.8.0-openjdk
+
+          ## code deploy agent
+          cd /home/ec2-user
+          curl -O https://aws-codedeploy-us-east-2.s3.amazonaws.com/latest/install
+          chmod +x ./install
+          sudo ./install auto
+
+          ## apache spark
+          wget https://artfiles.org/apache.org/spark/spark-2.4.5/spark-2.4.5-bin-hadoop2.7.tgz
+          tar -xzf spark-2.4.5-bin-hadoop2.7.tgz
+
+          ## Johns Hopkins COVID-19 (2019-nCoV) Data Repository
+          git clone https://github.com/CSSEGISandData/COVID-19.git 
+
+
+  ##################################################
+  ## CodePipeline
+  CodePipelineRole:  
+    Type: AWS::IAM::Role
+    Properties:      
+      RoleName: covid-19-aws-spark-reports-code-pipeline-role
+      Path: /service-role/      
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+              - codepipeline.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AdministratorAccess
+  
+  CodePipelineBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: covid-19-aws-spark-reports-code-pipeline-artifact-bucket
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  SparkCovidCodePipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Name: covid-19-aws-spark-reports-cf
+      RestartExecutionOnUpdate: false
+      RoleArn: !GetAtt CodePipelineRole.Arn
+      ArtifactStore:
+        Type: S3
+        Location: !Ref CodePipelineBucket
+      Stages: 
+      - 
+        Name: Source 
+        Actions: 
+          - 
+            Name: SourceAction
+            ActionTypeId: 
+              Category: Source 
+              Owner: ThirdParty 
+              Version: 1 
+              Provider: GitHub
+            OutputArtifacts: 
+              - 
+                Name: SourceArtifact
+            Configuration: 
+              Owner: shaylin
+              Branch: aws-deploy
+              OAuthToken: '{{resolve:ssm:githubOAuthToken:1}}'
+              PollForSourceChanges: false
+              Repo: covid-19-aws-spark-reports
+            RunOrder: 1 
+      - 
+        Name: Build 
+        Actions: 
+          - 
+            Name: Build
+            ActionTypeId: 
+              Category: Build
+              Owner: AWS
+              Version: 1 
+              Provider: CodeBuild
+            InputArtifacts:
+              -
+                Name: SourceArtifact
+            OutputArtifacts: 
+              - 
+                Name: BuildArtifact
+            Configuration: 
+              ProjectName: !Ref SparkCovidCodeBuild
+            RunOrder: 1
+      - 
+        Name: Deploy 
+        Actions: 
+          - 
+            Name: Deploy
+            ActionTypeId: 
+              Category: Deploy
+              Owner: AWS
+              Version: 1 
+              Provider: CodeDeploy            
+            Configuration: 
+              ApplicationName: !Ref CodeDeployApplication
+              DeploymentGroupName: !Ref CodeDeployApplicationGroup
+            InputArtifacts:
+              -
+                Name: BuildArtifact
+            RunOrder: 1
